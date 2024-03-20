@@ -1,1 +1,2 @@
-# diffusion
+# project
+A training project
