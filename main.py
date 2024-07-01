@@ -15,7 +15,7 @@ def main():
     cfg = get_config_from_yaml('cfg.yaml')
 
     accelerator = Accelerator(
-        mixed_precision='no',
+        mixed_precision='fp16',
         gradient_accumulation_steps=1,
     )
     device = accelerator.device
@@ -57,33 +57,10 @@ def main():
             with torch.no_grad():
                 x_t, epsilon = diff_model.module.noise_batch(x_0, t)
 
-            # with accelerator.autocast():
-            noise_mean, noise_var = diff_model(x_t, t, labels, null_cls)
+            with accelerator.autocast():
+                out_noise = diff_model(x_t, t, labels, null_cls)
 
-            loss_simple = ((noise_mean - epsilon)**2).flatten(1, -1).mean(-1)
-
-            mean_t_pred = diff_model.module.get_mean_t(noise_mean, x_t, t, True)
-            var_t_pred = diff_model.module.get_var_t(noise_var, t)
-
-            beta_t = diff_model.module.beta_t[t]
-            alpha_bar_t = diff_model.module.alpha_bar_t[t]
-            alpha_bar_t_1 = diff_model.module.alpha_bar_t[t-1]
-            sqrt_alpha_t = torch.sqrt(diff_model.module.alpha_bar_t[t])
-            sqrt_alpha_bar_t_1 = torch.sqrt(diff_model.module.alpha_bar_t[t-1])
-            beta_tilde_t = ((1 - alpha_bar_t_1) / (1 - alpha_bar_t)) * beta_t
-
-            mean_t = (sqrt_alpha_bar_t_1 * beta_t / (1 - alpha_bar_t)) * x_0 + \
-                (sqrt_alpha_t * (1 - alpha_bar_t_1) / (1 - alpha_bar_t)) * x_t 
-
-            mean_real = mean_t 
-            mean_fake = mean_t_pred.detach()
-            var_real = beta_tilde_t 
-            var_fake = var_t_pred
-            loss_vlb = (torch.log(torch.sqrt(var_fake) / torch.sqrt(var_real)) + \
-                        (var_real + (mean_real - mean_fake) ** 2) / (2 * var_fake) - \
-                        torch.tensor(1/2)).flatten(1, -1).mean(-1) * cfg.train.Lambda
-            
-            loss = (loss_simple + loss_vlb).mean()
+            loss = ((out_noise - epsilon)**2).flatten().mean()
 
             accelerator.backward(loss)
             opt.step()
@@ -91,12 +68,10 @@ def main():
 
             with torch.no_grad():
                 if writer:
-                    writer.add_scalar(f'train/loss_simple', loss_simple.mean(), steps)
-                    writer.add_scalar(f'train/loss_vlb', loss_vlb.mean(), steps)
                     writer.add_scalar(f'train/loss', loss, steps)
 
                 if steps % cfg.train.log_freq == 0 and logger is not None:
-                    logger.info(f'epoch{epoch}, steps{steps}, loss: {loss:.6f}, loss_simple: {loss_simple.mean():.6f}, loss_vlb: {loss_vlb.mean():.6f} ------')
+                    logger.info(f'epoch{epoch}, steps{steps}, loss: {loss:.6f} ------')
                 
                 if steps % cfg.train.sample_img_freq == 0 and writer is not None:
                     diff_model.eval()
